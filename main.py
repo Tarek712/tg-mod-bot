@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Warleaks AI Guard v10 (Smart Contextual Dictionary) is Active 24/7!"
+    return "Warleaks AI Guard v12 is Active 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -36,70 +36,63 @@ MODELS_TO_TRY = [
 
 # سجلات الذاكرة الذكية
 user_warnings = {}
-WARNING_EXPIRY_SECONDS = 86400  # تسقط التحذيرات بعد 24 ساعة من الالتزام
+WARNING_EXPIRY_SECONDS = 86400  # 24 ساعة
 
 user_message_timestamps = {}
 FLOOD_LIMIT = 5
 FLOOD_WINDOW = 6
 
-# دالة توحيد وتنظيف النص العربي (إزالة التطويل "حماااار" -> "حمار" وتوحيد الهمزات)
+# سجل لحفظ معرفات الأعضاء (username -> user_id) لتنفيذ الأوامر بالمعرف @username فوراً
+username_cache = {}
+
+def cache_user(user):
+    if user and user.username:
+        username_cache[user.username.lower()] = user.id
+
 def normalize_arabic(text):
     if not text:
         return ""
-    # إزالة التشكيل والمد (التطويل)
     text = re.sub(r"[\u064B-\u065F\u0640]", "", text)
-    # توحيد الهمزات
     text = re.sub(r"[أإآ]", "ا", text)
     text = re.sub(r"ة", "ه", text)
-    # تقليص الحروف المكررة أكثر من مرتين (مثلاً: غبيييي -> غبي)
     text = re.sub(r"(.)\1{2,}", r"\1", text)
     return text
 
 # =====================================================================
-# 3. القاموس المترابط الذكي (لا يعاقب إلا على تراكيب مترابطة مقصودة 100%)
+# 3. القاموس المترابط الذكي والشامل
 # =====================================================================
 
-# أ) سب الدين والذات الإلهية (تركيب مترابط: فعل سب/لعن + لفظ مقدس) -> حظر فوري نهائي!
 RELIGIOUS_COMPOUND_PATTERNS = [
-    # لعن/سب + دين/رب/إله/رسول/اسلام/قرآن (بمختلف اللهجات الشامية والمغاربية والمصرية والخليجية)
-    r"\b(يلعن|ينعل|نعل|العن|سب|تسب|يسب|كسم|كس ام|نيك)\s+(دين|رب|اله|رسول|نبي|قران|اسلام|مصحف)(ك|كم|هم|ه|ها|و|نا)?\b",
+    r"\b(يلعن|ينعل|نعل|العن|سب|تسب|يسب|كسم|كس\s+ام|نيك)\s+(دين|رب|اله|رسول|نبي|قران|اسلام|مصحف)(ك|كم|هم|ه|ها|و|نا)?\b",
     r"\b(دينك|ربك|الهك|رسولك|قرانك)\s+(الكلب|الوسخ|النجس|الزباله|القذر|ابن)\b",
-    r"\b(يا\s+كافر\s+يا\s+ابن|الاسلام\s+دين\s+ارهاب|دين\s+محمد\s+ال)\b"
+    r"\b(يا\s+كافر\s+يا\s+ابن|الاسلام\s+دين\s+ارهاب)\b"
 ]
 
-# ب) الفحش الجنسي الصريح وقذف الأعراض والأمهات -> تحذير فوري (وفي الـ 3 حظر)
 SEVERE_PROFANITY_PATTERNS = [
-    r"\b(كسمك|كسمكم|كسمه|كسمها|كس\s+امك|كس\s+اختك|طيزك|على\s+زبي|يا\s+زبي|مص\s+زبي)\b",
+    r"\b(كسمك|كسمكم|كسمه|كسمها|كسمهم|كس\s+ام|كس\s+اخت|طيزك|على\s+زبي|يا\s+زبي|مص\s+زبي)\b",
+    r"\b(منيوك|منيك|شرموط|شرموطه|قحبه|عرص|عرصا|معرص|قواد|ديوث|مخنث|عاهر|عاهره)\b",
     r"\b(ابن|ولد|يا\s+ابن|يا\s+ولد|امك|اختك)\s+(القحبه|الشرموطه|العاهره|الزنا|الحرام|الكلبه|المنيوكه|القواد)\b",
-    r"\b(يا|انت|انتم)\s+(قحبه|شرموط|شرموطه|منيوك|مخنث|قواد|ديوث|لوطي|عاهر|عاهره)\b",
     r"\b(انيك|نيك|بنيك)\s+(امك|اختك|عرضك|شرفك|اهلك|حريمك|صاحبتك)\b"
 ]
 
-# ج) الشتائم الشخصية الموجهة (بشرط وجود أداة توجيه "يا / أنت / يالـ" + الشتيمة، حتى لا يُحظر من يصف خبر أو عدو)
 TARGETED_INSULTS_PATTERNS = [
-    r"\b(يا|انت|انتي|انتم|اشباه|يـا|يا\s+ايها)\s+(حمار|غبي|كلب|حيوان|بهيم|بهيمه|بغل|سافل|نذل|قذر|واطي|زباله|حثاله|تافه|احمق|معتوه|مختل|مستحمر|منحط|رخيص|جبان|خسيس|مهجن|لقيط)\b",
-    r"\b(حمار|غبي|كلب|حيوان|تافه|سافل|واطي|قذر|زباله)\s+(مثل|زي)\s+(وجهك|شكلك|امثالك|راسـك)\b",
-    r"\b(انقلع|اخرس|سد\s+فمك|كرول|غور|كل\s+زق|كل\s+خرا|كل\s+تبن|بول\s+البعير)\b"
+    r"\b(يا|انت|انتي|انتم|اشباه|يا\s+ايها)\s+(حمار|غبي|كلب|حيوان|بهيم|بهيمه|بغل|سافل|نذل|قذر|واطي|زباله|حثاله|تافه|احمق|معتوه|مختل|مستحمر|منحط|رخيص|جبان|خسيس|مهجن|لقيط)\b",
+    r"\b(حمار|غبي|كلب|حيوان|تافه|سافل|واطي|قذر|زباله)\s+(مثل|زي)\s+(وجهك|شكلك|امثالك|راسك)\b",
+    r"\b(انقلع|اخرس|سد\s+فمك|كل\s+زق|كل\s+خرا|كل\s+تبن|بول\s+البعير)\b"
 ]
 
-# د) الطائفية المقترنة بالتحقير أو التكفير أو الشتم (يسمح بذكر الطوائف في الخبر ويمنع الشتم الطائفي)
 SECTARIAN_COMPOUND_PATTERNS = [
-    r"\b(يا|هؤلاء|ذول|هدول|كلاب|احفاد|ابناء|اولاد|انجس|اقذر)\s+(الروافض|الرافضه|النواصب|المجوس|المرتدين|الدواعش|الخوارج|النصيريه)\b",
+    r"\b(كس\s+ام|كسم|يلعن|ينعل|كلاب|انجاس|اقذر|احفاد|اولاد)\s+(الشيعه|السنه|الروافض|الرافضه|النواصب|المجوس|العلويين|الدروز|المسيحيين|الاكراد)\b",
     r"\b(روافض|رافضي|نواصب|ناصبي|مجوسي|صفوي)\s+(نجس|انجاس|كلب|كلاب|خونه|كفار|مشركين|اولاد\s+متعه|عيال\s+متعه)\b",
     r"\b(الشيعه|السنه|العلويين|الدروز|المسيحيين|الاكراد)\s+(كلهم\s+كفار|انجاس|كلاب|خونه|دمهم\s+حلال|يستاهلون\s+الذبح|الى\s+جهنم)\b"
 ]
 
-# هـ) القاموس المترابط للترويج والاحتيال المالي (شرط مزدوج: كلمة مالية/قنوات + فعل دعوة واستقطاب)
 PROMO_TOPICS = r"(تداول|التداول|فوركس|بيتكوين|كريبتو|عملات\s+رقميه|استثمار|يستثمر|دخل\s+يومي|دخل\s+اضافي|ربح\s+يومي|ارباح\s+مضمونه|تكبير\s+الحسابات|توصيات|نسخ\s+صفقات|قناتنا|قناتي)"
 PROMO_ACTIONS = r"(يراسلني|راسلني|راسلوني|يتواصل|تواصل\s+مع|تواصلوا|خاص|الخاص|انضموا|اشتركوا|تابعوا|مجاني|مضمون|يعطيه\s+الطريقه|اعطيك\s+الطريقه|من\s+جواله|من\s+هاتفك|بدون\s+خبره)"
-
-# عبارات ترويجية صريحة بذاتها
 DIRECT_PROMO_PHRASES = r"(اللي\s+حاب\s+يتعلم\s+التداول|تعلم\s+التداول\s+مجاني|يستثمر\s+بنفسه\s+وفي\s+جواله|ويكون\s+معه\s+دخل\s+يومي|يتواصل\s+معه\s+يعطيه\s+الطريقه|انضموا\s+لقناتي|اشتركوا\s+بقناتي|راسلوني\s+خاص\s+للعمل)"
 
-# ب) الروابط الصريحة
 DIRECT_LINK_PATTERN = r"(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+|\b[a-zA-Z0-9-]+\.(com|net|org|io|me|co|ly|tv)\b)"
 
-# و) القائمة البيضاء للعبارات الإخبارية والدينية القصيرة
 SAFE_SHORT_PHRASES = {
     "الله اكبر", "ما شاء الله", "ماشاء الله", "الحمد لله", "سبحان الله",
     "لا حول ولا قوه الا بالله", "يا رب", "يارب", "اللهم سلم", "عاجل", "تم", "مشكور",
@@ -107,20 +100,15 @@ SAFE_SHORT_PHRASES = {
     "حفظهم الله", "رحمه الله", "الله يرحمه", "امين", "اللهم امين"
 }
 
-# 4. دالة فحص الترويج المركّب (تمنع رسائل التداول والاستثمار الوهمي دون منع النقاش الاقتصادي العادي)
 def check_compound_promo(norm_text, raw_text):
-    # 1. إذا احتوت على عبارة ترويجية كاملة مطابقة
     if re.search(DIRECT_PROMO_PHRASES, norm_text):
         return "نشر إعلانات تداول أو استثمار ترويجي"
 
-    # 2. إذا اجتمع في الرسالة (موضوع مالي/تداول/قناة) + (فعل استقطاب ومراسلة) معاً!
     if re.search(PROMO_TOPICS, norm_text) and re.search(PROMO_ACTIONS, norm_text):
         return "الإعلان عن تداول/استثمار والدعوة للتواصل أو القنوات"
 
-    # 3. فحص المنشن (@username)
     mentions = re.findall(r"@([a-zA-Z0-9_]{4,32})", raw_text)
     if mentions:
-        # إذا وجد منشن ومعه أي كلمة استقطاب أو مال في نفس الرسالة
         if re.search(PROMO_TOPICS, norm_text) or re.search(PROMO_ACTIONS, norm_text):
             return "الترويج لحسابات خارجية ودعوة الأعضاء لمراسلتها"
 
@@ -156,13 +144,11 @@ def check_is_flooding(chat_id, user_id):
         return True
     return False
 
-# 5. تعليمات الذكاء الاصطناعي (يفحص السياق الكامل بدقة)
 SYSTEM_INSTRUCTION = """
 أنت مشرف أمني ذكي في مجموعة نقاشات عسكرية وسياسية ساخنة حول أحداث الشرق الأوسط.
 القاعدة الذهبية لمنع الظلم:
 - لا تحكم أبداً على كلمة مفردة معزولة عن سياقها!
-- إذا استخدم العضو كلمات قاسية لوصف حدث عسكري أو سياسي أو عدو خارج المجموعة (مثل: "قصف عنيف"، "هذا جيش غبي"، "خطة فاشلة"، "التداول بالبورصة هبط") فهذا نقاش طبيعي مسموح تماماً ("ALLOW").
-- النقاش السياسي الحاد والسخرية السياسية بين الأعضاء مسموحة طالما لم تتحول إلى بذاءة أو قذف.
+- النقاش السياسي الحاد والسخرية السياسية وانتقاد الجيوش والحكومات مسموح ("ALLOW").
 
 متى تتدخل فقط؟
 1. "RELIGIOUS_BAN" (حظر فوري نهائي):
@@ -170,8 +156,7 @@ SYSTEM_INSTRUCTION = """
 
 2. "WARN" (حذف الرسالة + إعطاء تحذير مع ذكر السبب الدقيق):
 - إذا كانت الجملة ككل عبارة عن إعلان ترويجي (دعوة لتعلم التداول، استثمار، دخل يومي، أو دعوة لمراسلة حساب أو متابعة قناة).
-- إذا كانت الجملة توجه شتيمة شخصية قذرة أو قذف أعراض لعضو آخر داخل النقاش.
-- إذا كانت الجملة تحرض طائفياً أو تكفر طائفة كاملة بألفاظ مسيئة.
+- إذا كانت الجملة توجه شتيمة شخصية قذرة أو قذف أعراض لعضو آخر أو لطائفة كاملة.
 
 3. "ALLOW" (سماح):
 - جميع النقاشات السياسية والعسكرية والاقتصادية والردود التفاعلية بين الأعضاء.
@@ -216,13 +201,15 @@ def get_user_mention(user):
     name = html.escape(user.first_name or "عضو")
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
-def execute_immediate_ban(message, user_mention, reason):
+def execute_immediate_ban(message, user_mention, reason, target_user_id=None, delete_msg=True):
+    uid = target_user_id or message.from_user.id
+    if delete_msg and message:
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except Exception:
+            pass
     try:
-        bot.delete_message(message.chat.id, message.message_id)
-    except Exception as e:
-        print(f"Delete error: {e}", flush=True)
-    try:
-        bot.ban_chat_member(message.chat.id, message.from_user.id)
+        bot.ban_chat_member(message.chat.id, uid)
         msg = bot.send_message(
             message.chat.id,
             f"🚫 <b>حظر فوري نهائي</b>\n"
@@ -234,16 +221,16 @@ def execute_immediate_ban(message, user_mention, reason):
     except Exception as e:
         print(f"Immediate Ban error: {e}", flush=True)
 
-def execute_mute_1h(message, target_user, reason):
-    user_mention = get_user_mention(target_user)
-    try:
-        bot.delete_message(message.chat.id, message.message_id)
-    except Exception:
-        pass
+def execute_mute_1h(message, target_user_id, user_mention, reason, delete_msg=True):
+    if delete_msg and message:
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except Exception:
+            pass
     try:
         bot.restrict_chat_member(
             message.chat.id,
-            target_user.id,
+            target_user_id,
             until_date=int(time.time()) + 3600,
             can_send_messages=False
         )
@@ -258,12 +245,36 @@ def execute_mute_1h(message, target_user, reason):
     except Exception as e:
         print(f"Mute error: {e}", flush=True)
 
-def execute_warning(message, user_mention, reason, target_user_id=None):
-    uid = target_user_id or message.from_user.id
+def execute_unmute_or_pardon(chat_id, target_user_id, user_mention, unban_too=False):
+    user_warnings.pop((chat_id, target_user_id), None)
     try:
-        bot.delete_message(message.chat.id, message.message_id)
+        if unban_too:
+            bot.unban_chat_member(chat_id, target_user_id, only_if_banned=True)
+        bot.restrict_chat_member(
+            chat_id,
+            target_user_id,
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True
+        )
     except Exception as e:
-        print(f"Delete msg error: {e}", flush=True)
+        print(f"Unmute/Unban error: {e}", flush=True)
+
+    msg = bot.send_message(
+        chat_id,
+        f"✅ تم إلغاء الكتم/الحظر وتصفير التحذيرات للعضو {user_mention}.",
+        parse_mode="HTML"
+    )
+    delete_later(chat_id, msg.message_id, delay=12)
+
+def execute_warning(message, user_mention, reason, target_user_id=None, delete_msg=True):
+    uid = target_user_id or message.from_user.id
+    if delete_msg and message:
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except Exception:
+            pass
 
     try:
         now = time.time()
@@ -298,59 +309,102 @@ def execute_warning(message, user_mention, reason, target_user_id=None):
     except Exception as e:
         print(f"Warning execution error: {e}", flush=True)
 
+# دالة لاستخراج العضو المستهدف سواء بالرد (Reply) أو بكتابة معرفه (@username) أو الـ ID
+def resolve_target_user(message):
+    # 1. إذا كان الأمر بالرد على رسالة
+    if message.reply_to_message and message.reply_to_message.from_user:
+        u = message.reply_to_message.from_user
+        cache_user(u)
+        return u.id, get_user_mention(u), message.reply_to_message
+
+    # 2. إذا كان الأمر يحتوي على منشن نصي خاص بتلغرام (text_mention)
+    if message.entities:
+        for ent in message.entities:
+            if ent.type == "text_mention" and ent.user:
+                cache_user(ent.user)
+                return ent.user.id, get_user_mention(ent.user), None
+
+    # 3. إذا كتب المشرف @username بجانب الأمر
+    match = re.search(r"@([a-zA-Z0-9_]{3,32})", message.text or "")
+    if match:
+        uname = match.group(1).lower()
+        uid = username_cache.get(uname)
+        if not uid:
+            try:
+                chat_obj = bot.get_chat(f"@{uname}")
+                uid = chat_obj.id
+            except Exception:
+                pass
+        if uid:
+            return uid, f"@{html.escape(match.group(1))}", None
+
+    # 4. إذا كتب المشرف رقم الـ ID مباشرة بجانب الأمر
+    id_match = re.search(r"\b(\d{6,15})\b", message.text or "")
+    if id_match:
+        uid = int(id_match.group(1))
+        return uid, f'<a href="tg://user?id={uid}">العضو ({uid})</a>', None
+
+    return None, None, None
+
+# معالج أوامر المشرفين (يدعم الرد Reply أو كتابة المعرف @username مباشرة)
 def handle_admin_commands(message):
-    if not message.reply_to_message or not message.text:
+    if not message.text:
         return False
 
-    cmd = message.text.strip()
-    if cmd not in ["طرد", "حظر", "كتم", "تحذير", "عفو"]:
+    # توحيد النص العربي للأمر وإزالة الـ /
+    raw_cmd_text = message.text.strip().lstrip("/")
+    # إزالة اليوزرنيم أو الـ ID من النص لمعرفة نوع الأمر
+    cmd_only = re.sub(r"(@[a-zA-Z0-9_]+|\b\d{6,15}\b)", "", raw_cmd_text).strip()
+    norm_cmd = normalize_arabic(cmd_only).lower()
+
+    UNMUTE_CMDS = {"الغاء الكتم", "الغاء كتم", "فك الكتم", "فك كتم", "رفع الكتم", "عفو", "سماح", "فك الحظر", "الغاء الحظر", "unmute", "unban", "unwarn"}
+    MUTE_CMDS = {"كتم", "تقييد", "اسكات", "mute"}
+    BAN_CMDS = {"طرد", "حظر", "بان", "ban"}
+    WARN_CMDS = {"تحذير", "انذار", "warn"}
+
+    all_cmds = UNMUTE_CMDS | MUTE_CMDS | BAN_CMDS | WARN_CMDS
+    if norm_cmd not in all_cmds:
         return False
 
-    target_msg = message.reply_to_message
-    target_user = target_msg.from_user
-    if not target_user:
-        return True
+    target_uid, target_mention, replied_msg = resolve_target_user(message)
 
-    target_mention = get_user_mention(target_user)
-
+    # حذف رسالة أمر المشرف ليبقى الشات نظيفاً
     try:
         bot.delete_message(message.chat.id, message.message_id)
     except Exception:
         pass
 
-    if cmd in ["طرد", "حظر"]:
-        execute_immediate_ban(target_msg, target_mention, "قرار إداري مباشر من مشرف المجموعة")
-    elif cmd == "كتم":
-        execute_mute_1h(target_msg, target_user, "قرار إداري من مشرف المجموعة")
-    elif cmd == "تحذير":
-        execute_warning(target_msg, target_mention, "مخالفة تنبيهات إدارة المجموعة", target_user_id=target_user.id)
-    elif cmd == "عفو":
-        user_warnings.pop((message.chat.id, target_user.id), None)
-        try:
-            bot.restrict_chat_member(
-                message.chat.id,
-                target_user.id,
-                can_send_messages=True,
-                can_send_media_messages=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True
-            )
-        except Exception:
-            pass
+    if not target_uid:
         msg = bot.send_message(
             message.chat.id,
-            f"✅ تم إصدار عفو إداري لـ {target_mention} (تم تصفير التحذيرات ورفع التقييد).",
+            "⚠️ لم أتمكن من تحديد العضو! يرجى عمل <b>رد (Reply)</b> على رسالته أو كتابة معرفه الصحيح مثل: <code>الغاء الكتم @username</code>",
             parse_mode="HTML"
         )
-        delete_later(message.chat.id, msg.message_id, delay=12)
+        delete_later(message.chat.id, msg.message_id, delay=10)
+        return True
+
+    if norm_cmd in UNMUTE_CMDS:
+        unban_flag = norm_cmd in {"فك الحظر", "الغاء الحظر", "unban", "عفو"}
+        execute_unmute_or_pardon(message.chat.id, target_uid, target_mention, unban_too=unban_flag)
+    elif norm_cmd in MUTE_CMDS:
+        execute_mute_1h(replied_msg or message, target_uid, target_mention, "قرار إداري من مشرف المجموعة", delete_msg=bool(replied_msg))
+    elif norm_cmd in BAN_CMDS:
+        execute_immediate_ban(replied_msg or message, target_mention, "قرار إداري مباشر من مشرف المجموعة", target_user_id=target_uid, delete_msg=bool(replied_msg))
+    elif norm_cmd in WARN_CMDS:
+        execute_warning(replied_msg or message, target_mention, "مخالفة تنبيهات إدارة المجموعة", target_user_id=target_uid, delete_msg=bool(replied_msg))
 
     return True
 
 def process_moderation(message, is_edited=False):
+    # حفظ معرف المرسل في الذاكرة المؤقتة دائماً
+    if message.from_user:
+        cache_user(message.from_user)
+    if message.reply_to_message and message.reply_to_message.from_user:
+        cache_user(message.reply_to_message.from_user)
+
     if getattr(message, 'is_automatic_forward', False) or message.sender_chat:
         return
 
-    # حماية المشرفين وتفعيل أوامرهم
     try:
         member = bot.get_chat_member(message.chat.id, message.from_user.id)
         if member.status in ['creator', 'administrator']:
@@ -362,21 +416,18 @@ def process_moderation(message, is_edited=False):
 
     user_mention = get_user_mention(message.from_user)
 
-    # فحص الإغراق المتتالي
     if not is_edited and check_is_flooding(message.chat.id, message.from_user.id):
-        execute_mute_1h(message, message.from_user, "الإغراق المتتالي (إرسال رسائل متكررة بسرعة كبيرة)")
+        execute_mute_1h(message, message.from_user.id, user_mention, "الإغراق المتتالي (إرسال رسائل متكررة بسرعة كبيرة)")
         return
 
     raw_text = (message.text or message.caption or "").strip()
     norm_text = normalize_arabic(raw_text)
 
-    # --- المرحلة أ: الفلتر المترابط السريع (بدون أخطاء الكلمات المفردة) ---
-    # 1. تحويل رسائل أو اقتباس من قنوات خارجية
+    # --- المرحلة أ: الفلتر المترابط السريع ---
     if message.forward_from_chat or getattr(message, 'external_reply', None):
         execute_warning(message, user_mention, "تحويل أو اقتباس رسائل من قنوات خارجية")
         return
 
-    # 2. روابط صريحة أو مخفية تحت النص
     if has_hidden_links(message) or re.search(DIRECT_LINK_PATTERN, raw_text, re.IGNORECASE):
         execute_warning(message, user_mention, "نشر روابط خارجية في المجموعة")
         return
@@ -384,42 +435,36 @@ def process_moderation(message, is_edited=False):
     if not raw_text:
         return
 
-    # 3. فحص الترويج المترابط (موضوع تداول/استثمار + دعوة للمراسلة أو القنوات)
     promo_reason = check_compound_promo(norm_text, raw_text)
     if promo_reason:
         execute_warning(message, user_mention, promo_reason)
         return
 
-    # 4. فحص سب الدين المترابط -> حظر فوري بدون تحذيرات!
     for pattern in RELIGIOUS_COMPOUND_PATTERNS:
         if re.search(pattern, norm_text, re.IGNORECASE):
             execute_immediate_ban(message, user_mention, "سب الدين أو ازدراء المقدسات الدينية")
             return
 
-    # 5. فحص الفحش الجنسي الصريح وقذف الأعراض
     for pattern in SEVERE_PROFANITY_PATTERNS:
         if re.search(pattern, norm_text, re.IGNORECASE):
             execute_warning(message, user_mention, "قذف أعراض أو استخدام ألفاظ فاحشة نابية")
             return
 
-    # 6. فحص الشتائم الشخصية الموجهة (يشترط وجود أداة نداء/مخاطبة + الشتيمة)
     for pattern in TARGETED_INSULTS_PATTERNS:
         if re.search(pattern, norm_text, re.IGNORECASE):
             execute_warning(message, user_mention, "توجيه شتيمة شخصية مباشرة لعضو في المجموعة")
             return
 
-    # 7. فحص الطائفية المقترنة بالتحقير أو التكفير
     for pattern in SECTARIAN_COMPOUND_PATTERNS:
         if re.search(pattern, norm_text, re.IGNORECASE):
             execute_warning(message, user_mention, "إثارة النعرات الطائفية والتحقير المذهبي")
             return
 
-    # 8. فحص الإغراق النصي الطويل جداً (أكثر من 1500 حرف)
     if len(raw_text) > 1500:
         execute_warning(message, user_mention, "الإغراق النصي (إرسال نص طويل جداً يعطل النقاش)")
         return
 
-    # --- المرحلة ب: الفلتر الذكي (Gemini AI) لفهم السياق الكامل ---
+    # --- المرحلة ب: الفلتر الذكي (Gemini AI) ---
     clean_words = re.sub(r"[^\w\s]", "", norm_text).strip().split()
     if len(clean_words) < 3 or norm_text in SAFE_SHORT_PHRASES:
         return
@@ -446,6 +491,6 @@ def handle_edited_message(message):
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    print("Warleaks AI Guard v10 (Smart Contextual Dictionary) is running...", flush=True)
+    print("Warleaks AI Guard v12 is running...", flush=True)
     bot.remove_webhook()
     bot.infinity_polling(skip_pending=True)
