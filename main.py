@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Warleaks AI Guard v7 (Detailed Warnings) is Active 24/7!"
+    return "Warleaks AI Guard v8 (Ultimate Edition) is Active 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -33,8 +33,15 @@ MODELS_TO_TRY = [
     "gemini-2.0-flash"
 ]
 
-# سجل حفظ التحذيرات لكل عضو: {(chat_id, user_id): عدد_التحذيرات}
+# سجلات الذاكرة الذكية:
+# أ) سجل التحذيرات بصلاحية 24 ساعة: {(chat_id, user_id): [timestamp1, timestamp2, ...]}
 user_warnings = {}
+WARNING_EXPIRY_SECONDS = 86400  # 24 ساعة
+
+# ب) سجل مكافحة الإغراق (Anti-Flood): {(chat_id, user_id): [timestamp1, timestamp2, ...]}
+user_message_timestamps = {}
+FLOOD_LIMIT = 5       # أقصى عدد رسائل متتالية
+FLOOD_WINDOW = 6      # خلال 6 ثوانٍ فقط
 
 # 3. القواميس البرمجية الدقيقة
 # أ) سب الدين والذات الإلهية الصريح -> حظر وطرد فوري بدون تحذيرات!
@@ -63,7 +70,15 @@ SECTARIAN_WORDS = [
     r"\bروافض\b", r"\bرافضي\b", r"\bنواصب\b", r"\bناصبي\b"
 ]
 
-# 4. دالة الفحص الذكي للمنشن (@username): ترجع سبب المخالفة بدقة إذا كان ترويجاً
+# و) القائمة البيضاء للعبارات الإخبارية والدينية القصيرة (لتوفير التوكنز وتسريع البوت)
+SAFE_SHORT_PHRASES = {
+    "الله اكبر", "الله أكبر", "ما شاء الله", "ماشاء الله", "الحمد لله", "سبحان الله",
+    "لا حول ولا قوة الا بالله", "يا رب", "يارب", "اللهم سلم", "عاجل", "تم", "مشكور",
+    "احسنت", "أحسنت", "صح", "صحيح", "نعم", "لا", "اكيد", "أكيد", "ان شاء الله",
+    "إن شاء الله", "حفظهم الله", "رحمه الله", "الله يرحمه", "امين", "آمين", "اللهم امين"
+}
+
+# 4. دالة الفحص الذكي للمنشن (@username)
 def check_promotional_mention(text):
     mentions = re.findall(r"@([a-zA-Z0-9_]{4,32})", text)
     if not mentions:
@@ -93,7 +108,22 @@ def has_hidden_links(message):
             return True
     return False
 
-# 6. تعليمات الذكاء الاصطناعي (يرجع الحكم + السبب الدقيق بالعربية)
+# 6. دالة فحص الإغراق المتتالي (Anti-Flood)
+def check_is_flooding(chat_id, user_id):
+    now = time.time()
+    key = (chat_id, user_id)
+    timestamps = user_message_timestamps.get(key, [])
+    # الاحتفاظ فقط بالرسائل المرسلة خلال آخر 6 ثوانٍ
+    timestamps = [t for t in timestamps if now - t < FLOOD_WINDOW]
+    timestamps.append(now)
+    user_message_timestamps[key] = timestamps
+
+    if len(timestamps) > FLOOD_LIMIT:
+        user_message_timestamps[key] = []  # تصفير بعد رصد الإغراق
+        return True
+    return False
+
+# 7. تعليمات الذكاء الاصطناعي (Gemini)
 SYSTEM_INSTRUCTION = """
 أنت مشرف أمني في مجموعة نقاشات عسكرية وسياسية ساخنة حول أحداث الشرق الأوسط.
 القاعدة الذهبية:
@@ -103,7 +133,7 @@ SYSTEM_INSTRUCTION = """
 مهمتك تصنيف الرسائل إلى 3 أحكام مع كتابة سبب واضح ومختصر باللغة العربية عند وجود مخالفة:
 
 1. "RELIGIOUS_BAN" (حظر فوري نهائي):
-- يستخدم حصراً في حالة: سب الله أو الذات الإلهية، سب الدين، سب الأنبياء والرسل، سب صحابة الرسول، الاستهزاء بالقرآن أو الكتب السماوية، أو ازدراء الأديان والمقدسات.
+- يستخدم حصراً في حالة: سب الله أو الذات الإلهية، سب الدين، سب الأنبياء والرسل، الاستهزاء بالقرآن أو الكتب السماوية، أو ازدراء الأديان والمقدسات.
 
 2. "WARN" (حذف الرسالة + إعطاء تحذير مع ذكر السبب):
 - الشتائم الشخصية المباشرة والألفاظ البذيئة أو القذف الموجه لعضو آخر (اكتب السبب مثلاً: "توجيه شتيمة شخصية وألفاظ غير لائقة لعضو آخر").
@@ -138,7 +168,6 @@ def analyze_with_ai(text):
             continue
     return "ALLOW", ""
 
-# بقاء رسالة التحذير لمدة 20 ثانية ليتمكن العضو من قراءة سبب تحذيره بوضوح
 def delete_later(chat_id, message_id, delay=20):
     def task():
         time.sleep(delay)
@@ -148,81 +177,174 @@ def delete_later(chat_id, message_id, delay=20):
             pass
     threading.Thread(target=task, daemon=True).start()
 
-# عمل منشن قابل للضغط للعضو حتى لو لم يكن لديه يوزرنيم
 def get_user_mention(user):
     if user.username:
         return f"@{user.username}"
-    name = (user.first_name or "عضو").replace("[", "").replace("]", "")
+    name = (user.first_name or "عضو").replace("[", "").replace("]", "").replace("*", "").replace("_", "")
     return f"[{name}](tg://user?id={user.id})"
 
-# دالة الحظر الفوري (لسب الدين وازدراء الأديان)
+# دالة الحظر الفوري
 def execute_immediate_ban(message, user_mention, reason):
     try:
         bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        pass
+    try:
         bot.ban_chat_member(message.chat.id, message.from_user.id)
         msg = bot.send_message(
             message.chat.id,
-            f"🚫 **حظر فوري نهائي**\n"
+            f"🚫 *حظر فوري نهائي*\n"
             f"👤 العضو: {user_mention}\n"
-            f"📌 **سبب الحظر:** {reason}.",
+            f"📌 *سبب الحظر:* {reason}.",
             parse_mode="Markdown"
         )
         delete_later(message.chat.id, msg.message_id, delay=25)
     except Exception as e:
         print(f"Immediate Ban error: {e}", flush=True)
 
-# دالة نظام التحذيرات الثلاثة مع شرح واضح لسبب التحذير
-def execute_warning(message, user_mention, reason):
+# دالة الكتم المؤقت لمدة ساعة (تُستخدم عند الإغراق المتتالي أو بأمر المشرف)
+def execute_mute_1h(message, target_user, reason):
+    user_mention = get_user_mention(target_user)
     try:
         bot.delete_message(message.chat.id, message.message_id)
-        
-        key = (message.chat.id, message.from_user.id)
-        warnings_count = user_warnings.get(key, 0) + 1
-        user_warnings[key] = warnings_count
+    except Exception:
+        pass
+    try:
+        bot.restrict_chat_member(
+            message.chat.id,
+            target_user.id,
+            until_date=int(time.time()) + 3600,
+            can_send_messages=False
+        )
+        msg = bot.send_message(
+            message.chat.id,
+            f"🔇 *تقييد مؤقت (كتم لمدة ساعة)*\n"
+            f"👤 العضو: {user_mention}\n"
+            f"📌 *السبب:* {reason}.",
+            parse_mode="Markdown"
+        )
+        delete_later(message.chat.id, msg.message_id, delay=20)
+    except Exception as e:
+        print(f"Mute error: {e}", flush=True)
+
+# دالة نظام التحذيرات الثلاثة (مع انتهاء صلاحية التحذير القديم بعد 24 ساعة)
+def execute_warning(message, user_mention, reason, target_user_id=None):
+    uid = target_user_id or message.from_user.id
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        pass
+
+    try:
+        now = time.time()
+        key = (message.chat.id, uid)
+        # تصفية التحذيرات القديمة التي مر عليها أكثر من 24 ساعة
+        valid_warnings = [t for t in user_warnings.get(key, []) if now - t < WARNING_EXPIRY_SECONDS]
+        valid_warnings.append(now)
+        user_warnings[key] = valid_warnings
+        warnings_count = len(valid_warnings)
 
         if warnings_count >= 3:
-            bot.ban_chat_member(message.chat.id, message.from_user.id)
+            bot.ban_chat_member(message.chat.id, uid)
             user_warnings.pop(key, None)
             msg = bot.send_message(
                 message.chat.id,
-                f"🚫 **طرد وحظر نهائي (استنفاد التحذيرات 3/3)**\n"
+                f"🚫 *طرد وحظر نهائي (استنفاد التحذيرات 3/3)*\n"
                 f"👤 العضو: {user_mention}\n"
-                f"📌 **سبب المخالفة الأخيرة:** {reason}.",
+                f"📌 *سبب المخالفة الأخيرة:* {reason}.",
                 parse_mode="Markdown"
             )
         else:
             remaining = 3 - warnings_count
             msg = bot.send_message(
                 message.chat.id,
-                f"⚠️ **تنبيه وتحذير ({warnings_count}/3)**\n"
+                f"⚠️ *تنبيه وتحذير ({warnings_count}/3)*\n"
                 f"👤 العضو: {user_mention}\n"
-                f"📌 **لماذا تم تحذيرك وحذف رسالتك؟**\n"
-                f"• السبب: **{reason}**.\n"
-                f"⏳ متبقي لك ({remaining}) تحذير قبل الحظر التلقائي من المجموعة.",
+                f"📌 *لماذا تم تحذيرك وحذف رسالتك؟*\n"
+                f"• السبب: *{reason}*.\n"
+                f"⏳ متبقي لك ({remaining}) تحذير قبل الحظر التلقائي (تسقط التحذيرات بعد 24 ساعة من الالتزام).",
                 parse_mode="Markdown"
             )
         delete_later(message.chat.id, msg.message_id, delay=20)
     except Exception as e:
         print(f"Warning execution error: {e}", flush=True)
 
-@bot.message_handler(func=lambda m: m.chat.type in ['group', 'supergroup'], content_types=['text', 'photo', 'video', 'document'])
-def moderate_group(message):
+# 8. معالج أوامر المشرفين السريعة بالرد (طرد / كتم / تحذير / عفو)
+def handle_admin_commands(message):
+    if not message.reply_to_message or not message.text:
+        return False
+
+    cmd = message.text.strip()
+    if cmd not in ["طرد", "حظر", "كتم", "تحذير", "عفو"]:
+        return False
+
+    target_msg = message.reply_to_message
+    target_user = target_msg.from_user
+    if not target_user:
+        return True
+
+    target_mention = get_user_mention(target_user)
+
+    # حذف رسالة أمر المشرف ليبقى الشات نظيفاً
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        pass
+
+    if cmd in ["طرد", "حظر"]:
+        execute_immediate_ban(target_msg, target_mention, "قرار إداري مباشر من مشرف المجموعة")
+    elif cmd == "كتم":
+        execute_mute_1h(target_msg, target_user, "قرار إداري من مشرف المجموعة")
+    elif cmd == "تحذير":
+        execute_warning(target_msg, target_mention, "مخالفة تنبيهات إدارة المجموعة", target_user_id=target_user.id)
+    elif cmd == "عفو":
+        user_warnings.pop((message.chat.id, target_user.id), None)
+        try:
+            bot.restrict_chat_member(
+                message.chat.id,
+                target_user.id,
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+        except Exception:
+            pass
+        msg = bot.send_message(
+            message.chat.id,
+            f"✅ تم إصدار عفو إداري لـ {target_mention} (تم تصفير التحذيرات ورفع التقييد).",
+            parse_mode="Markdown"
+        )
+        delete_later(message.chat.id, msg.message_id, delay=12)
+
+    return True
+
+# 9. الدالة الرئيسية لفحص الرسائل (الجديدة والمعدلة)
+def process_moderation(message, is_edited=False):
     # 1. تجاهل منشورات القناة الرسمية التلقائية والرسائل المرسلة باسم القناة/المجموعة
     if getattr(message, 'is_automatic_forward', False) or message.sender_chat:
         return
 
-    # 2. حماية المشرفين ومالك المجموعة
+    # 2. التحقق مما إذا كان المرسل مشرفاً (لتفعيل أوامر الإدارة وتجاهل فحص رسائله)
     try:
         member = bot.get_chat_member(message.chat.id, message.from_user.id)
         if member.status in ['creator', 'administrator']:
+            if not is_edited:
+                handle_admin_commands(message)
             return
     except Exception:
         return
 
-    text = (message.text or message.caption or "").strip()
     user_mention = get_user_mention(message.from_user)
 
-    # --- المرحلة أ: الفلتر البرمجي الفوري مع أسباب مفصلة ودقيقة ---
+    # 3. فحص الإغراق المتتالي (Anti-Flood) للرسائل الجديدة فقط
+    if not is_edited and check_is_flooding(message.chat.id, message.from_user.id):
+        execute_mute_1h(message, message.from_user, "الإغراق المتتالي (إرسال رسائل متكررة بسرعة كبيرة)")
+        return
+
+    text = (message.text or message.caption or "").strip()
+
+    # --- المرحلة أ: الفلتر البرمجي الفوري ---
     # 1. تحويل رسائل أو اقتباس من قنوات خارجية
     if message.forward_from_chat or getattr(message, 'external_reply', None):
         execute_warning(message, user_mention, "تحويل أو اقتباس رسائل من قنوات خارجية")
@@ -238,7 +360,7 @@ def moderate_group(message):
         execute_warning(message, user_mention, "نشر عبارات ترويجية أو دعائية")
         return
 
-    # 4. فحص المنشن الترويجي (@قناة أو @بوت) مع السماح بمنشن الأعضاء العاديين
+    # 4. فحص المنشن الترويجي (@قناة أو @بوت)
     promo_mention_reason = check_promotional_mention(text)
     if promo_mention_reason:
         execute_warning(message, user_mention, promo_mention_reason)
@@ -270,16 +392,40 @@ def moderate_group(message):
         execute_warning(message, user_mention, "الإغراق النصي (إرسال نص طويل جداً يعطل النقاش)")
         return
 
-    # --- المرحلة ب: الفلتر الذكي (Gemini AI) يحدد المخالفة ويكتب سببها الدقيق ---
-    if len(text.split()) >= 2:
-        action, ai_reason = analyze_with_ai(text)
-        if action == "RELIGIOUS_BAN":
-            execute_immediate_ban(message, user_mention, ai_reason or "سب الدين وازدراء الأديان والمقدسات")
-        elif action == "WARN":
-            execute_warning(message, user_mention, ai_reason or "الإساءة اللفظية ومخالفة آداب النقاش")
+    # --- المرحلة ب: الفلتر الموفر للتوكنز + الذكاء الاصطناعي (Gemini AI) ---
+    # تنظيف النص من علامات الترقيم لفحص عدد الكلمات والعبارات الآمنة
+    clean_text = re.sub(r"[^\w\s]", "", text).strip()
+    words = clean_text.split()
+
+    # إذا كانت الرسالة قصيرة جداً (أقل من 3 كلمات) أو من العبارات المعتادة، لا نرسلها لـ Gemini لتوفير الرصيد
+    if len(words) < 3 or clean_text in SAFE_SHORT_PHRASES:
+        return
+
+    action, ai_reason = analyze_with_ai(text)
+    if action == "RELIGIOUS_BAN":
+        execute_immediate_ban(message, user_mention, ai_reason or "سب الدين وازدراء الأديان والمقدسات")
+    elif action == "WARN":
+        execute_warning(message, user_mention, ai_reason or "الإساءة اللفظية ومخالفة آداب النقاش")
+
+# استقبال الرسائل الجديدة (نصوص، صور، فيديوهات، ملصقات، ملفات)
+@bot.message_handler(
+    func=lambda m: m.chat.type in ['group', 'supergroup'],
+    content_types=['text', 'photo', 'video', 'document', 'sticker', 'animation']
+)
+def handle_new_message(message):
+    process_moderation(message, is_edited=False)
+
+# استقبال الرسائل المعدلة (Edited Messages) لكشف التحايل بتعديل الرسالة بعد إرسالها
+@bot.edited_message_handler(
+    func=lambda m: m.chat.type in ['group', 'supergroup'],
+    content_types=['text', 'photo', 'video', 'document']
+)
+def handle_edited_message(message):
+    process_moderation(message, is_edited=True)
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    print("Warleaks AI Guard v7 (Detailed Warnings) is running...", flush=True)
+    print("Warleaks AI Guard v8 (Ultimate Edition) is running...", flush=True)
     bot.remove_webhook()
     bot.infinity_polling(skip_pending=True)
+    
