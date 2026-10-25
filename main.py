@@ -1,33 +1,55 @@
 import os
+import sys
 import re
 import json
 import time
 import html
+import traceback
 import threading
 from flask import Flask
 import telebot
 from google import genai
 from google.genai import types
 
+print("==> Starting script initialization...", flush=True)
+
 # 1. سيرفر الويب لإبقاء Render مستيقظاً 24/7
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Warleaks AI Guard v13 (Admin Logs & Custom Mute) is Active 24/7!"
+    return "Warleaks AI Guard v14 (Anti-Crash) is Active 24/7!"
 
 def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        print(f"==> Starting Flask web server on port {port}...", flush=True)
+        app.run(host="0.0.0.0", port=port, use_reloader=False)
+    except Exception as e:
+        print(f"Web server error: {e}", flush=True)
 
-# 2. جلب المفاتيح من إعدادات البيئة في Render
+# تشغيل سيرفر الويب فوراً في الخلفية حتى لا يغلق Render التطبيق أبداً
+threading.Thread(target=run_web, daemon=True).start()
+
+# 2. جلب المفاتيح بأمان من إعدادات البيئة في Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-# يمكنك وضع LOG_CHAT_ID في Render، أو ببساطة كتابة "تفعيل السجل" داخل مجموعة المشرفين!
 LOG_CHAT_ID = os.environ.get("LOG_CHAT_ID", "").strip()
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client = genai.Client(api_key=GEMINI_API_KEY)
+if not TELEGRAM_TOKEN:
+    print("CRITICAL ERROR: TELEGRAM_TOKEN is missing in Render Environment Variables!", flush=True)
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=True)
+
+client = None
+if GEMINI_API_KEY:
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        print("==> Gemini AI Client initialized successfully.", flush=True)
+    except Exception as e:
+        print(f"==> Warning: Gemini Client init error: {e}", flush=True)
+else:
+    print("WARNING: GEMINI_API_KEY is missing!", flush=True)
 
 MODELS_TO_TRY = [
     "gemini-2.5-flash",
@@ -202,6 +224,8 @@ SYSTEM_INSTRUCTION = """
 """
 
 def analyze_with_ai(text):
+    if not client:
+        return "ALLOW", ""
     for model_name in MODELS_TO_TRY:
         try:
             response = client.models.generate_content(
@@ -275,7 +299,6 @@ def execute_immediate_ban(message, user_mention, reason, target_user_id=None, de
             parse_mode="HTML"
         )
         delete_later(message.chat.id, msg.message_id, delay=25)
-        # إرسال تقرير دائم لمجموعة المشرفين
         send_admin_log("حظر نهائي 🚫", message.chat, uid, user_mention, reason, offending_text, by_who)
     except Exception as e:
         print(f"Immediate Ban error: {e}", flush=True)
@@ -288,7 +311,6 @@ def execute_mute(message, target_user_id, user_mention, reason, duration_seconds
         except Exception:
             pass
 
-    # تلغرام يشترط ألا تقل مدة الكتم المؤقت عن 30 ثانية وألا تزيد عن 366 يوماً
     duration_seconds = max(60, min(int(duration_seconds), 365 * 86400))
     duration_str = format_duration_ar(duration_seconds)
 
@@ -307,7 +329,6 @@ def execute_mute(message, target_user_id, user_mention, reason, duration_seconds
             parse_mode="HTML"
         )
         delete_later(message.chat.id, msg.message_id, delay=20)
-        # إرسال تقرير دائم لمجموعة المشرفين
         send_admin_log(f"كتم لمدة {duration_str} 🔇", message.chat, target_user_id, user_mention, reason, offending_text, by_who)
     except Exception as e:
         print(f"Mute error: {e}", flush=True)
@@ -415,12 +436,10 @@ def resolve_target_user(message):
     return None, None, None
 
 def extract_mute_duration_seconds(cmd_text):
-    # حذف اليوزرنيم والـ ID الطويل من النص حتى لا يختلط رقم الـ ID بعدد الساعات
     cleaned = re.sub(r"(@[a-zA-Z0-9_]+|\b\d{6,15}\b)", "", cmd_text)
-    # البحث عن رقم (عدد الساعات أو الدقائق أو الأيام) من 1 إلى 4 خانات
     m = re.search(r"\b(\d+(?:\.\d+)?)\s*(د|دقيقه|دقيقة|دقائق|س|ساعه|ساعة|ساعات|ي|يوم|ايام|أيام|m|h|d)?\b", cleaned, re.IGNORECASE)
     if not m:
-        return 3600  # الافتراضي: ساعة واحدة (3600 ثانية)
+        return 3600
 
     val = float(m.group(1))
     unit = (m.group(2) or "س").lower()
@@ -429,7 +448,7 @@ def extract_mute_duration_seconds(cmd_text):
     elif unit.startswith(("ي", "ا", "أ", "d")):
         return int(val * 86400)
     else:
-        return int(val * 3600)  # الساعات هي الافتراضي لأي رقم يكتبه المشرف
+        return int(val * 3600)
 
 def handle_admin_commands(message):
     global active_log_chat_id
@@ -439,7 +458,6 @@ def handle_admin_commands(message):
     raw_cmd_text = message.text.strip().lstrip("/")
     norm_full = normalize_arabic(raw_cmd_text).lower()
 
-    # أمر تفعيل مجموعة السجل للمشرفين
     if norm_full in {"تفعيل السجل", "ربط السجل", "setlog", "سجل المشرفين"}:
         active_log_chat_id = message.chat.id
         bot.send_message(
@@ -451,7 +469,6 @@ def handle_admin_commands(message):
         )
         return True
 
-    # تنظيف النص لاستخراج نوع الأمر الأساسي (مع إزالة اليوزرنيم، الـ ID، وأرقام الساعات)
     cmd_only = re.sub(r"(@[a-zA-Z0-9_]+|\b\d+(?:\.\d+)?\s*(?:د|دقيقه|دقيقة|دقائق|س|ساعه|ساعة|ساعات|ي|يوم|ايام|أيام|m|h|d)?\b)", "", raw_cmd_text).strip()
     norm_cmd = normalize_arabic(cmd_only).lower()
 
@@ -482,8 +499,4 @@ def handle_admin_commands(message):
         return True
 
     if norm_cmd in UNMUTE_CMDS:
-        unban_flag = norm_cmd in {"فك الحظر", "الغاء الحظر", "unban", "عفو"}
-        execute_unmute_or_pardon(message.chat.id, target_uid, target_mention, unban_too=unban_flag)
-    elif norm_cmd in MUTE_CMDS:
-        duration_sec = extract_mute_duration_seconds(raw_cmd_text)
-        exe
+        unban_flag = nor
