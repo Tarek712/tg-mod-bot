@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Warleaks AI Guard v12 is Active 24/7!"
+    return "Warleaks AI Guard v13 (Admin Logs & Custom Mute) is Active 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -23,6 +23,8 @@ def run_web():
 # 2. جلب المفاتيح من إعدادات البيئة في Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+# يمكنك وضع LOG_CHAT_ID في Render، أو ببساطة كتابة "تفعيل السجل" داخل مجموعة المشرفين!
+LOG_CHAT_ID = os.environ.get("LOG_CHAT_ID", "").strip()
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -42,8 +44,8 @@ user_message_timestamps = {}
 FLOOD_LIMIT = 5
 FLOOD_WINDOW = 6
 
-# سجل لحفظ معرفات الأعضاء (username -> user_id) لتنفيذ الأوامر بالمعرف @username فوراً
 username_cache = {}
+active_log_chat_id = int(LOG_CHAT_ID) if LOG_CHAT_ID.lstrip("-").isdigit() else None
 
 def cache_user(user):
     if user and user.username:
@@ -59,7 +61,41 @@ def normalize_arabic(text):
     return text
 
 # =====================================================================
-# 3. القاموس المترابط الذكي والشامل
+# 3. دالة إرسال التقارير الدائمة إلى مجموعة المشرفين (لا تُحذف أبداً)
+# =====================================================================
+def send_admin_log(action_title, source_chat, target_uid, target_mention, reason, offending_text="", by_who="النظام الآلي (AI/Regex)"):
+    global active_log_chat_id
+    if not active_log_chat_id:
+        return
+
+    chat_title = html.escape(source_chat.title or "المجموعة")
+    safe_reason = html.escape(reason)
+    safe_text = html.escape(offending_text[:700]) if offending_text else "<i>(رسالة وسائط أو أمر مباشر بدون نص)</i>"
+    timestamp_str = time.strftime('%Y-%m-%d | %H:%M:%S', time.gmtime(time.time() + 3600))
+
+    log_msg = (
+        f"📋 <b>تقرير أمني — {action_title}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏠 <b>المجموعة:</b> {chat_title}\n"
+        f"👤 <b>العضو:</b> {target_mention}\n"
+        f"🆔 <b>المعرف الرقمي:</b> <code>{target_uid}</code>\n"
+        f"👮 <b>بواسطة:</b> {html.escape(by_who)}\n"
+        f"📌 <b>السبب:</b> {safe_reason}\n"
+        f"🕒 <b>التوقيت:</b> {timestamp_str}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💬 <b>محتوى الرسالة المحذوفة:</b>\n"
+        f"<pre>{safe_text}</pre>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <b>للعفو السريع انسخ وأرسل في المجموعة:</b>\n"
+        f"<code>الغاء الكتم {target_uid}</code> أو <code>فك الحظر {target_uid}</code>"
+    )
+    try:
+        bot.send_message(active_log_chat_id, log_msg, parse_mode="HTML")
+    except Exception as e:
+        print(f"Log send error: {e}", flush=True)
+
+# =====================================================================
+# 4. القاموس المترابط الذكي والشامل
 # =====================================================================
 
 RELIGIOUS_COMPOUND_PATTERNS = [
@@ -201,8 +237,29 @@ def get_user_mention(user):
     name = html.escape(user.first_name or "عضو")
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
-def execute_immediate_ban(message, user_mention, reason, target_user_id=None, delete_msg=True):
+def format_duration_ar(seconds):
+    hours = seconds / 3600
+    if hours < 1:
+        mins = max(1, int(seconds / 60))
+        return f"{mins} دقيقة"
+    elif hours == 1:
+        return "ساعة واحدة"
+    elif hours == 2:
+        return "ساعتين"
+    elif 3 <= hours <= 10 and hours.is_integer():
+        return f"{int(hours)} ساعات"
+    elif hours.is_integer():
+        return f"{int(hours)} ساعة"
+    else:
+        return f"{hours:.1f} ساعة"
+
+# =====================================================================
+# 5. دوال تنفيذ العقوبات مع إرسال إشعار لغرفة المشرفين
+# =====================================================================
+
+def execute_immediate_ban(message, user_mention, reason, target_user_id=None, delete_msg=True, by_who="النظام الآلي"):
     uid = target_user_id or message.from_user.id
+    offending_text = (message.text or message.caption or "") if message else ""
     if delete_msg and message:
         try:
             bot.delete_message(message.chat.id, message.message_id)
@@ -218,30 +275,40 @@ def execute_immediate_ban(message, user_mention, reason, target_user_id=None, de
             parse_mode="HTML"
         )
         delete_later(message.chat.id, msg.message_id, delay=25)
+        # إرسال تقرير دائم لمجموعة المشرفين
+        send_admin_log("حظر نهائي 🚫", message.chat, uid, user_mention, reason, offending_text, by_who)
     except Exception as e:
         print(f"Immediate Ban error: {e}", flush=True)
 
-def execute_mute_1h(message, target_user_id, user_mention, reason, delete_msg=True):
+def execute_mute(message, target_user_id, user_mention, reason, duration_seconds=3600, delete_msg=True, by_who="النظام الآلي"):
+    offending_text = (message.text or message.caption or "") if (delete_msg and message) else ""
     if delete_msg and message:
         try:
             bot.delete_message(message.chat.id, message.message_id)
         except Exception:
             pass
+
+    # تلغرام يشترط ألا تقل مدة الكتم المؤقت عن 30 ثانية وألا تزيد عن 366 يوماً
+    duration_seconds = max(60, min(int(duration_seconds), 365 * 86400))
+    duration_str = format_duration_ar(duration_seconds)
+
     try:
         bot.restrict_chat_member(
             message.chat.id,
             target_user_id,
-            until_date=int(time.time()) + 3600,
+            until_date=int(time.time()) + duration_seconds,
             can_send_messages=False
         )
         msg = bot.send_message(
             message.chat.id,
-            f"🔇 <b>تقييد مؤقت (كتم لمدة ساعة)</b>\n"
+            f"🔇 <b>تقييد مؤقت (كتم لمدة {duration_str})</b>\n"
             f"👤 العضو: {user_mention}\n"
             f"📌 <b>السبب:</b> {html.escape(reason)}.",
             parse_mode="HTML"
         )
         delete_later(message.chat.id, msg.message_id, delay=20)
+        # إرسال تقرير دائم لمجموعة المشرفين
+        send_admin_log(f"كتم لمدة {duration_str} 🔇", message.chat, target_user_id, user_mention, reason, offending_text, by_who)
     except Exception as e:
         print(f"Mute error: {e}", flush=True)
 
@@ -268,8 +335,9 @@ def execute_unmute_or_pardon(chat_id, target_user_id, user_mention, unban_too=Fa
     )
     delete_later(chat_id, msg.message_id, delay=12)
 
-def execute_warning(message, user_mention, reason, target_user_id=None, delete_msg=True):
+def execute_warning(message, user_mention, reason, target_user_id=None, delete_msg=True, by_who="النظام الآلي"):
     uid = target_user_id or message.from_user.id
+    offending_text = (message.text or message.caption or "") if (delete_msg and message) else ""
     if delete_msg and message:
         try:
             bot.delete_message(message.chat.id, message.message_id)
@@ -294,6 +362,7 @@ def execute_warning(message, user_mention, reason, target_user_id=None, delete_m
                 f"📌 <b>سبب المخالفة الأخيرة:</b> {html.escape(reason)}.",
                 parse_mode="HTML"
             )
+            send_admin_log("حظر نهائي (تراكم 3/3 تحذيرات) 🚫", message.chat, uid, user_mention, reason, offending_text, by_who)
         else:
             remaining = 3 - warnings_count
             msg = bot.send_message(
@@ -305,26 +374,26 @@ def execute_warning(message, user_mention, reason, target_user_id=None, delete_m
                 f"⏳ متبقي لك ({remaining}) تحذير قبل الحظر التلقائي من المجموعة.",
                 parse_mode="HTML"
             )
+            send_admin_log(f"تحذير ({warnings_count}/3) ⚠️", message.chat, uid, user_mention, reason, offending_text, by_who)
         delete_later(message.chat.id, msg.message_id, delay=20)
     except Exception as e:
         print(f"Warning execution error: {e}", flush=True)
 
-# دالة لاستخراج العضو المستهدف سواء بالرد (Reply) أو بكتابة معرفه (@username) أو الـ ID
+# =====================================================================
+# 6. استخراج العضو المستهدف ومدة الكتم المخصصة التي يطلبها المشرف
+# =====================================================================
 def resolve_target_user(message):
-    # 1. إذا كان الأمر بالرد على رسالة
     if message.reply_to_message and message.reply_to_message.from_user:
         u = message.reply_to_message.from_user
         cache_user(u)
         return u.id, get_user_mention(u), message.reply_to_message
 
-    # 2. إذا كان الأمر يحتوي على منشن نصي خاص بتلغرام (text_mention)
     if message.entities:
         for ent in message.entities:
             if ent.type == "text_mention" and ent.user:
                 cache_user(ent.user)
                 return ent.user.id, get_user_mention(ent.user), None
 
-    # 3. إذا كتب المشرف @username بجانب الأمر
     match = re.search(r"@([a-zA-Z0-9_]{3,32})", message.text or "")
     if match:
         uname = match.group(1).lower()
@@ -338,7 +407,6 @@ def resolve_target_user(message):
         if uid:
             return uid, f"@{html.escape(match.group(1))}", None
 
-    # 4. إذا كتب المشرف رقم الـ ID مباشرة بجانب الأمر
     id_match = re.search(r"\b(\d{6,15})\b", message.text or "")
     if id_match:
         uid = int(id_match.group(1))
@@ -346,15 +414,45 @@ def resolve_target_user(message):
 
     return None, None, None
 
-# معالج أوامر المشرفين (يدعم الرد Reply أو كتابة المعرف @username مباشرة)
+def extract_mute_duration_seconds(cmd_text):
+    # حذف اليوزرنيم والـ ID الطويل من النص حتى لا يختلط رقم الـ ID بعدد الساعات
+    cleaned = re.sub(r"(@[a-zA-Z0-9_]+|\b\d{6,15}\b)", "", cmd_text)
+    # البحث عن رقم (عدد الساعات أو الدقائق أو الأيام) من 1 إلى 4 خانات
+    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(د|دقيقه|دقيقة|دقائق|س|ساعه|ساعة|ساعات|ي|يوم|ايام|أيام|m|h|d)?\b", cleaned, re.IGNORECASE)
+    if not m:
+        return 3600  # الافتراضي: ساعة واحدة (3600 ثانية)
+
+    val = float(m.group(1))
+    unit = (m.group(2) or "س").lower()
+    if unit.startswith(("د", "m")):
+        return int(val * 60)
+    elif unit.startswith(("ي", "ا", "أ", "d")):
+        return int(val * 86400)
+    else:
+        return int(val * 3600)  # الساعات هي الافتراضي لأي رقم يكتبه المشرف
+
 def handle_admin_commands(message):
+    global active_log_chat_id
     if not message.text:
         return False
 
-    # توحيد النص العربي للأمر وإزالة الـ /
     raw_cmd_text = message.text.strip().lstrip("/")
-    # إزالة اليوزرنيم أو الـ ID من النص لمعرفة نوع الأمر
-    cmd_only = re.sub(r"(@[a-zA-Z0-9_]+|\b\d{6,15}\b)", "", raw_cmd_text).strip()
+    norm_full = normalize_arabic(raw_cmd_text).lower()
+
+    # أمر تفعيل مجموعة السجل للمشرفين
+    if norm_full in {"تفعيل السجل", "ربط السجل", "setlog", "سجل المشرفين"}:
+        active_log_chat_id = message.chat.id
+        bot.send_message(
+            message.chat.id,
+            f"✅ <b>تم اعتماد هذه المجموعة كغرفة سجل ومراقبة للمشرفين!</b>\n"
+            f"🆔 معرف المجموعة (لحفظه في Render داخل خانة <code>LOG_CHAT_ID</code> إن أردت ثباته الدائم): <code>{message.chat.id}</code>\n"
+            f"📌 ستصلك هنا جميع تقارير الحظر والكتم والتحذيرات مع نصوص الرسائل المحذوفة دون أن تُمسح.",
+            parse_mode="HTML"
+        )
+        return True
+
+    # تنظيف النص لاستخراج نوع الأمر الأساسي (مع إزالة اليوزرنيم، الـ ID، وأرقام الساعات)
+    cmd_only = re.sub(r"(@[a-zA-Z0-9_]+|\b\d+(?:\.\d+)?\s*(?:د|دقيقه|دقيقة|دقائق|س|ساعه|ساعة|ساعات|ي|يوم|ايام|أيام|m|h|d)?\b)", "", raw_cmd_text).strip()
     norm_cmd = normalize_arabic(cmd_only).lower()
 
     UNMUTE_CMDS = {"الغاء الكتم", "الغاء كتم", "فك الكتم", "فك كتم", "رفع الكتم", "عفو", "سماح", "فك الحظر", "الغاء الحظر", "unmute", "unban", "unwarn"}
@@ -367,8 +465,8 @@ def handle_admin_commands(message):
         return False
 
     target_uid, target_mention, replied_msg = resolve_target_user(message)
+    admin_name = f"المشرف ({message.from_user.first_name})"
 
-    # حذف رسالة أمر المشرف ليبقى الشات نظيفاً
     try:
         bot.delete_message(message.chat.id, message.message_id)
     except Exception:
@@ -377,7 +475,7 @@ def handle_admin_commands(message):
     if not target_uid:
         msg = bot.send_message(
             message.chat.id,
-            "⚠️ لم أتمكن من تحديد العضو! يرجى عمل <b>رد (Reply)</b> على رسالته أو كتابة معرفه الصحيح مثل: <code>الغاء الكتم @username</code>",
+            "⚠️ لم أتمكن من تحديد العضو! يرجى عمل <b>رد (Reply)</b> على رسالته أو كتابة معرفه مثل: <code>كتم 3 @username</code>",
             parse_mode="HTML"
         )
         delete_later(message.chat.id, msg.message_id, delay=10)
@@ -387,110 +485,5 @@ def handle_admin_commands(message):
         unban_flag = norm_cmd in {"فك الحظر", "الغاء الحظر", "unban", "عفو"}
         execute_unmute_or_pardon(message.chat.id, target_uid, target_mention, unban_too=unban_flag)
     elif norm_cmd in MUTE_CMDS:
-        execute_mute_1h(replied_msg or message, target_uid, target_mention, "قرار إداري من مشرف المجموعة", delete_msg=bool(replied_msg))
-    elif norm_cmd in BAN_CMDS:
-        execute_immediate_ban(replied_msg or message, target_mention, "قرار إداري مباشر من مشرف المجموعة", target_user_id=target_uid, delete_msg=bool(replied_msg))
-    elif norm_cmd in WARN_CMDS:
-        execute_warning(replied_msg or message, target_mention, "مخالفة تنبيهات إدارة المجموعة", target_user_id=target_uid, delete_msg=bool(replied_msg))
-
-    return True
-
-def process_moderation(message, is_edited=False):
-    # حفظ معرف المرسل في الذاكرة المؤقتة دائماً
-    if message.from_user:
-        cache_user(message.from_user)
-    if message.reply_to_message and message.reply_to_message.from_user:
-        cache_user(message.reply_to_message.from_user)
-
-    if getattr(message, 'is_automatic_forward', False) or message.sender_chat:
-        return
-
-    try:
-        member = bot.get_chat_member(message.chat.id, message.from_user.id)
-        if member.status in ['creator', 'administrator']:
-            if not is_edited:
-                handle_admin_commands(message)
-            return
-    except Exception:
-        pass
-
-    user_mention = get_user_mention(message.from_user)
-
-    if not is_edited and check_is_flooding(message.chat.id, message.from_user.id):
-        execute_mute_1h(message, message.from_user.id, user_mention, "الإغراق المتتالي (إرسال رسائل متكررة بسرعة كبيرة)")
-        return
-
-    raw_text = (message.text or message.caption or "").strip()
-    norm_text = normalize_arabic(raw_text)
-
-    # --- المرحلة أ: الفلتر المترابط السريع ---
-    if message.forward_from_chat or getattr(message, 'external_reply', None):
-        execute_warning(message, user_mention, "تحويل أو اقتباس رسائل من قنوات خارجية")
-        return
-
-    if has_hidden_links(message) or re.search(DIRECT_LINK_PATTERN, raw_text, re.IGNORECASE):
-        execute_warning(message, user_mention, "نشر روابط خارجية في المجموعة")
-        return
-
-    if not raw_text:
-        return
-
-    promo_reason = check_compound_promo(norm_text, raw_text)
-    if promo_reason:
-        execute_warning(message, user_mention, promo_reason)
-        return
-
-    for pattern in RELIGIOUS_COMPOUND_PATTERNS:
-        if re.search(pattern, norm_text, re.IGNORECASE):
-            execute_immediate_ban(message, user_mention, "سب الدين أو ازدراء المقدسات الدينية")
-            return
-
-    for pattern in SEVERE_PROFANITY_PATTERNS:
-        if re.search(pattern, norm_text, re.IGNORECASE):
-            execute_warning(message, user_mention, "قذف أعراض أو استخدام ألفاظ فاحشة نابية")
-            return
-
-    for pattern in TARGETED_INSULTS_PATTERNS:
-        if re.search(pattern, norm_text, re.IGNORECASE):
-            execute_warning(message, user_mention, "توجيه شتيمة شخصية مباشرة لعضو في المجموعة")
-            return
-
-    for pattern in SECTARIAN_COMPOUND_PATTERNS:
-        if re.search(pattern, norm_text, re.IGNORECASE):
-            execute_warning(message, user_mention, "إثارة النعرات الطائفية والتحقير المذهبي")
-            return
-
-    if len(raw_text) > 1500:
-        execute_warning(message, user_mention, "الإغراق النصي (إرسال نص طويل جداً يعطل النقاش)")
-        return
-
-    # --- المرحلة ب: الفلتر الذكي (Gemini AI) ---
-    clean_words = re.sub(r"[^\w\s]", "", norm_text).strip().split()
-    if len(clean_words) < 3 or norm_text in SAFE_SHORT_PHRASES:
-        return
-
-    action, ai_reason = analyze_with_ai(raw_text)
-    if action == "RELIGIOUS_BAN":
-        execute_immediate_ban(message, user_mention, ai_reason or "سب الدين وازدراء الأديان والمقدسات")
-    elif action == "WARN":
-        execute_warning(message, user_mention, ai_reason or "الإساءة اللفظية أو مخالفة آداب النقاش")
-
-@bot.message_handler(
-    func=lambda m: m.chat.type in ['group', 'supergroup'],
-    content_types=['text', 'photo', 'video', 'document', 'sticker', 'animation']
-)
-def handle_new_message(message):
-    process_moderation(message, is_edited=False)
-
-@bot.edited_message_handler(
-    func=lambda m: m.chat.type in ['group', 'supergroup'],
-    content_types=['text', 'photo', 'video', 'document']
-)
-def handle_edited_message(message):
-    process_moderation(message, is_edited=True)
-
-if __name__ == "__main__":
-    threading.Thread(target=run_web, daemon=True).start()
-    print("Warleaks AI Guard v12 is running...", flush=True)
-    bot.remove_webhook()
-    bot.infinity_polling(skip_pending=True)
+        duration_sec = extract_mute_duration_seconds(raw_cmd_text)
+        exe
