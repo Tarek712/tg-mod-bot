@@ -1,66 +1,39 @@
 import os
-import sys
 import re
-import json
 import time
 import html
 import traceback
 import threading
 from flask import Flask
 import telebot
-from google import genai
-from google.genai import types
 
-print("==> Starting script initialization...", flush=True)
+print("==> Starting Warleaks Turbo Guard v16 (Pure Regex - Zero Latency)...", flush=True)
 
 # 1. سيرفر الويب لإبقاء Render مستيقظاً 24/7
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Warleaks AI Guard v14 (Anti-Crash) is Active 24/7!"
+    return "Warleaks Turbo Guard v16 (No-AI, Ultra Fast) is Active 24/7!"
 
 def run_web():
     try:
         port = int(os.environ.get("PORT", 8080))
-        print(f"==> Starting Flask web server on port {port}...", flush=True)
         app.run(host="0.0.0.0", port=port, use_reloader=False)
     except Exception as e:
         print(f"Web server error: {e}", flush=True)
 
-# تشغيل سيرفر الويب فوراً في الخلفية حتى لا يغلق Render التطبيق أبداً
 threading.Thread(target=run_web, daemon=True).start()
 
-# 2. جلب المفاتيح بأمان من إعدادات البيئة في Render
+# 2. جلب المفاتيح من إعدادات البيئة في Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 LOG_CHAT_ID = os.environ.get("LOG_CHAT_ID", "").strip()
 
-if not TELEGRAM_TOKEN:
-    print("CRITICAL ERROR: TELEGRAM_TOKEN is missing in Render Environment Variables!", flush=True)
-
-bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=True)
-
-client = None
-if GEMINI_API_KEY:
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        print("==> Gemini AI Client initialized successfully.", flush=True)
-    except Exception as e:
-        print(f"==> Warning: Gemini Client init error: {e}", flush=True)
-else:
-    print("WARNING: GEMINI_API_KEY is missing!", flush=True)
-
-MODELS_TO_TRY = [
-    "gemini-2.5-flash",
-    "gemini-flash-latest",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash"
-]
+bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=True, num_threads=8)
 
 # سجلات الذاكرة الذكية
 user_warnings = {}
-WARNING_EXPIRY_SECONDS = 86400  # 24 ساعة
+WARNING_EXPIRY_SECONDS = 86400  # تسقط التحذيرات بعد 24 ساعة
 
 user_message_timestamps = {}
 FLOOD_LIMIT = 5
@@ -73,19 +46,92 @@ def cache_user(user):
     if user and user.username:
         username_cache[user.username.lower()] = user.id
 
+# دالة تنظيف ذكية جداً تكشف التحايل بالرموز أو المد أو الهمزات
 def normalize_arabic(text):
     if not text:
         return ""
+    # إزالة التشكيل والمد (التطويل)
     text = re.sub(r"[\u064B-\u065F\u0640]", "", text)
+    # توحيد الهمزات والتاء المربوطة والألف المقصورة
     text = re.sub(r"[أإآ]", "ا", text)
     text = re.sub(r"ة", "ه", text)
+    text = re.sub(r"ى", "ي", text)
+    # إزالة النقاط والرموز التي يضعها المخربون وسط الكلمة (مثل: ق.ح.ب.ه -> قحبه)
+    text = re.sub(r"(?<=[ء-ي])[\.\-\_\*\,]+(?=[ء-ي])", "", text)
+    # تقليص الحروف المكررة (مثلاً: حماااار -> حمار)
     text = re.sub(r"(.)\1{2,}", r"\1", text)
     return text
 
 # =====================================================================
-# 3. دالة إرسال التقارير الدائمة إلى مجموعة المشرفين (لا تُحذف أبداً)
+# 3. القاموس البرمجي الصاروخي المترابط (شامل ودقيق بدون ظلم)
 # =====================================================================
-def send_admin_log(action_title, source_chat, target_uid, target_mention, reason, offending_text="", by_who="النظام الآلي (AI/Regex)"):
+
+# أ) سب الدين والذات الإلهية والمقدسات -> حظر فوري نهائي من أول مرة!
+RELIGIOUS_COMPOUND_PATTERNS = [
+    r"\b(يلعن|ينعل|نعل|العن|سب|تسب|يسب|كسم|كس\s*ام|نيك|انيك|خرا\s*علي|تفو\s*علي)\s*(دين|رب|اله|رسول|نبي|قران|اسلام|مصحف|شرع)(ك|كم|هم|ه|ها|و|نا|ين)?\b",
+    r"\b(دينك|ربك|الهك|رسولك|قرانك|معبودك)\s*(الكلب|الوسخ|النجس|الزباله|القذر|ابن|العرص|القحبه)\b",
+    r"\b(كسم|كس\s*ام|يلعن|ينعل)\s*(الله|الرب|الرسول|النبي|الاسلام|القران)\b"
+]
+
+# ب) الفحش الجنسي الصريح وقذف الأعراض (تحذير فوري -> وفي الـ 3 حظر)
+SEVERE_PROFANITY_PATTERNS = [
+    r"\b(كسمك|كسمكم|كسمه|كسمها|كسمهم|كس\s*امك|كس\s*امكم|كس\s*امه|كس\s*امها|كس\s*اختك|كسختك)\b",
+    r"\b(منيوك|منيك|متناك|شرموط|شرموطه|قحبه|عرص|عرصا|معرص|قواد|ديوث|مخنث|لوطي|عاهر|عاهره|زاني|زانيه)\b",
+    r"\b(ابن|ولد|يا\s*ابن|يا\s*ولد|امك|اختك|خالتك|عمتك|زوجتك|مرتك)\s*(القحبه|الشرموطه|العاهره|الزنا|الحرام|الكلبه|المنيوكه|المتناكه|القواد|الوسخه)\b",
+    r"\b(انيك|نيك|بنيك|اركب)\s*(امك|اختك|عرضك|شرفك|اهلك|حريمك|صاحبتك|قبيلتك)\b",
+    r"\b(طيزك|على\s*زبي|يا\s*زبي|مص\s*زبي|لحس\s*طيزي|كل\s*خرا|كل\s*زق)\b"
+]
+
+# ج) الشتائم الشخصية الموجهة (بشرط أداة مخاطبة/توجيه + الشتيمة لمنع الحظر الخاطئ في النقاش العسكري)
+TARGETED_INSULTS_PATTERNS = [
+    r"\b(يا|انت|انتي|انتم|انتو|اشباه|يا\s*ايها|ولك\s*يا|اسمع\s*يا)\s*(حمار|غبي|كلب|حيوان|بهيم|بهيمه|بغل|سافل|نذل|قذر|واطي|زباله|حثاله|تافه|احمق|معتوه|مختل|مستحمر|منحط|رخيص|جبان|خسيس|مهجن|لقيط|كلب\s*اليهود|مطبل\s*قذر)\b",
+    r"\b(حمار|غبي|كلب|حيوان|تافه|سافل|واطي|قذر|زباله)\s*(مثل|زي)\s*(وجهك|شكلك|امثالك|راسك)\b",
+    r"\b(انقلع|اخرس|سد\s*فمك|سد\s*بوزك|اضبط\s*لسانك\s*يا\s*كلب|بول\s*البعير)\b"
+]
+
+# د) الطائفية المقترنة بالتحقير أو الشتم (يسمح بذكر الطوائف في الأخبار ويمنع شتمها)
+SECTARIAN_COMPOUND_PATTERNS = [
+    r"\b(كس\s*ام|كسم|يلعن|ينعل|كلاب|انجاس|اقذر|احفاد|اولاد|خنازير|حمير)\s*(الشيعه|السنه|الروافض|الرافضه|النواصب|المجوس|العلويين|الدروز|المسيحيين|الاكراد|النصيريه)\b",
+    r"\b(روافض|رافضي|نواصب|ناصبي|مجوسي|صفوي|نصيري)\s*(نجس|انجاس|كلب|كلاب|خونه|كفار|مشركين|اولاد\s*متعه|عيال\s*متعه|ابن\s*متعه)\b",
+    r"\b(الشيعه|السنه|العلويين|الدروز|المسيحيين|الاكراد)\s*(كلهم\s*كفار|انجاس|كلاب|خونه|دمهم\s*حلال|يستاهلون\s*الذبح|الى\s*جهنم|اولاد\s*حرام)\b"
+]
+
+# هـ) القاموس المترابط للترويج والاحتيال المالي (شرط مزدوج: موضوع مالي + فعل استقطاب)
+PROMO_TOPICS = r"(تداول|التداول|فوركس|بيتكوين|كريبتو|عملات\s*رقميه|استثمار|يستثمر|دخل\s*يومي|دخل\s*اضافي|دخل\s*شهري|ربح\s*يومي|ارباح\s*مضمونه|تكبير\s*الحسابات|توصيات|نسخ\s*صفقات|قناتنا|قناتي|كروبنا|مجموعتنا)"
+PROMO_ACTIONS = r"(يراسلني|راسلني|راسلوني|يتواصل|تواصل\s*مع|تواصلوا|خاص|الخاص|انضموا|اشتركوا|تابعوا|مجاني|مضمون|يعطيه\s*الطريقه|اعطيك\s*الطريقه|من\s*جواله|من\s*هاتفك|بدون\s*خبره|اضغط\s*هنا|سجل\s*الان)"
+DIRECT_PROMO_PHRASES = r"(اللي\s*حاب\s*يتعلم\s*التداول|تعلم\s*التداول\s*مجاني|يستثمر\s*بنفسه|ويكون\s*معه\s*دخل\s*يومي|يتواصل\s*معه\s*يعطيه\s*الطريقه|انضموا\s*لقناتي|اشتركوا\s*بقناتي|راسلوني\s*خاص\s*للعمل|ربح\s*من\s*الانترنت)"
+
+DIRECT_LINK_PATTERN = r"(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+|\b[a-zA-Z0-9-]+\.(com|net|org|io|me|co|ly|tv)\b)"
+
+# =====================================================================
+# 4. أوامر التفعيل والفحص المباشرة
+# =====================================================================
+@bot.message_handler(commands=['start', 'ping', 'setlog', 'id'])
+def direct_commands(message):
+    global active_log_chat_id
+    cmd = message.text.split()[0].lower().lstrip("/")
+    if cmd in ['setlog', 'id']:
+        active_log_chat_id = message.chat.id
+        bot.reply_to(
+            message,
+            f"✅ <b>تم تفعيل وربط مجموعة السجل بنجاح!</b>\n"
+            f"🆔 رقم المجموعة (لحفظه في Render داخل خانة <code>LOG_CHAT_ID</code>): <code>{message.chat.id}</code>\n"
+            f"📌 ستصلك هنا جميع إشعارات الحظر والكتم والتحذيرات تلقائياً.",
+            parse_mode="HTML"
+        )
+    else:
+        log_status = f"مربوط بالمجموعة (<code>{active_log_chat_id}</code>)" if active_log_chat_id else "غير مربوط بعد (اكتب <b>تفعيل السجل</b> في مجموعة المشرفين)"
+        bot.reply_to(
+            message,
+            f"⚡ <b>حارس التسريبات الصاروخي (v16 - بدون AI) يعمل بسرعة قصوى!</b>\n"
+            f"📋 <b>حالة سجل المشرفين:</b> {log_status}",
+            parse_mode="HTML"
+        )
+
+# =====================================================================
+# 5. دالة إرسال التقارير الدائمة إلى مجموعة المشرفين
+# =====================================================================
+def send_admin_log(action_title, source_chat, target_uid, target_mention, reason, offending_text="", by_who="الفلتر الفوري ⚡"):
     global active_log_chat_id
     if not active_log_chat_id:
         return
@@ -115,48 +161,6 @@ def send_admin_log(action_title, source_chat, target_uid, target_mention, reason
         bot.send_message(active_log_chat_id, log_msg, parse_mode="HTML")
     except Exception as e:
         print(f"Log send error: {e}", flush=True)
-
-# =====================================================================
-# 4. القاموس المترابط الذكي والشامل
-# =====================================================================
-
-RELIGIOUS_COMPOUND_PATTERNS = [
-    r"\b(يلعن|ينعل|نعل|العن|سب|تسب|يسب|كسم|كس\s+ام|نيك)\s+(دين|رب|اله|رسول|نبي|قران|اسلام|مصحف)(ك|كم|هم|ه|ها|و|نا)?\b",
-    r"\b(دينك|ربك|الهك|رسولك|قرانك)\s+(الكلب|الوسخ|النجس|الزباله|القذر|ابن)\b",
-    r"\b(يا\s+كافر\s+يا\s+ابن|الاسلام\s+دين\s+ارهاب)\b"
-]
-
-SEVERE_PROFANITY_PATTERNS = [
-    r"\b(كسمك|كسمكم|كسمه|كسمها|كسمهم|كس\s+ام|كس\s+اخت|طيزك|على\s+زبي|يا\s+زبي|مص\s+زبي)\b",
-    r"\b(منيوك|منيك|شرموط|شرموطه|قحبه|عرص|عرصا|معرص|قواد|ديوث|مخنث|عاهر|عاهره)\b",
-    r"\b(ابن|ولد|يا\s+ابن|يا\s+ولد|امك|اختك)\s+(القحبه|الشرموطه|العاهره|الزنا|الحرام|الكلبه|المنيوكه|القواد)\b",
-    r"\b(انيك|نيك|بنيك)\s+(امك|اختك|عرضك|شرفك|اهلك|حريمك|صاحبتك)\b"
-]
-
-TARGETED_INSULTS_PATTERNS = [
-    r"\b(يا|انت|انتي|انتم|اشباه|يا\s+ايها)\s+(حمار|غبي|كلب|حيوان|بهيم|بهيمه|بغل|سافل|نذل|قذر|واطي|زباله|حثاله|تافه|احمق|معتوه|مختل|مستحمر|منحط|رخيص|جبان|خسيس|مهجن|لقيط)\b",
-    r"\b(حمار|غبي|كلب|حيوان|تافه|سافل|واطي|قذر|زباله)\s+(مثل|زي)\s+(وجهك|شكلك|امثالك|راسك)\b",
-    r"\b(انقلع|اخرس|سد\s+فمك|كل\s+زق|كل\s+خرا|كل\s+تبن|بول\s+البعير)\b"
-]
-
-SECTARIAN_COMPOUND_PATTERNS = [
-    r"\b(كس\s+ام|كسم|يلعن|ينعل|كلاب|انجاس|اقذر|احفاد|اولاد)\s+(الشيعه|السنه|الروافض|الرافضه|النواصب|المجوس|العلويين|الدروز|المسيحيين|الاكراد)\b",
-    r"\b(روافض|رافضي|نواصب|ناصبي|مجوسي|صفوي)\s+(نجس|انجاس|كلب|كلاب|خونه|كفار|مشركين|اولاد\s+متعه|عيال\s+متعه)\b",
-    r"\b(الشيعه|السنه|العلويين|الدروز|المسيحيين|الاكراد)\s+(كلهم\s+كفار|انجاس|كلاب|خونه|دمهم\s+حلال|يستاهلون\s+الذبح|الى\s+جهنم)\b"
-]
-
-PROMO_TOPICS = r"(تداول|التداول|فوركس|بيتكوين|كريبتو|عملات\s+رقميه|استثمار|يستثمر|دخل\s+يومي|دخل\s+اضافي|ربح\s+يومي|ارباح\s+مضمونه|تكبير\s+الحسابات|توصيات|نسخ\s+صفقات|قناتنا|قناتي)"
-PROMO_ACTIONS = r"(يراسلني|راسلني|راسلوني|يتواصل|تواصل\s+مع|تواصلوا|خاص|الخاص|انضموا|اشتركوا|تابعوا|مجاني|مضمون|يعطيه\s+الطريقه|اعطيك\s+الطريقه|من\s+جواله|من\s+هاتفك|بدون\s+خبره)"
-DIRECT_PROMO_PHRASES = r"(اللي\s+حاب\s+يتعلم\s+التداول|تعلم\s+التداول\s+مجاني|يستثمر\s+بنفسه\s+وفي\s+جواله|ويكون\s+معه\s+دخل\s+يومي|يتواصل\s+معه\s+يعطيه\s+الطريقه|انضموا\s+لقناتي|اشتركوا\s+بقناتي|راسلوني\s+خاص\s+للعمل)"
-
-DIRECT_LINK_PATTERN = r"(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+|\b[a-zA-Z0-9-]+\.(com|net|org|io|me|co|ly|tv)\b)"
-
-SAFE_SHORT_PHRASES = {
-    "الله اكبر", "ما شاء الله", "ماشاء الله", "الحمد لله", "سبحان الله",
-    "لا حول ولا قوه الا بالله", "يا رب", "يارب", "اللهم سلم", "عاجل", "تم", "مشكور",
-    "احسنت", "صح", "صحيح", "نعم", "لا", "اكيد", "ان شاء الله",
-    "حفظهم الله", "رحمه الله", "الله يرحمه", "امين", "اللهم امين"
-}
 
 def check_compound_promo(norm_text, raw_text):
     if re.search(DIRECT_PROMO_PHRASES, norm_text):
@@ -202,50 +206,6 @@ def check_is_flooding(chat_id, user_id):
         return True
     return False
 
-SYSTEM_INSTRUCTION = """
-أنت مشرف أمني ذكي في مجموعة نقاشات عسكرية وسياسية ساخنة حول أحداث الشرق الأوسط.
-القاعدة الذهبية لمنع الظلم:
-- لا تحكم أبداً على كلمة مفردة معزولة عن سياقها!
-- النقاش السياسي الحاد والسخرية السياسية وانتقاد الجيوش والحكومات مسموح ("ALLOW").
-
-متى تتدخل فقط؟
-1. "RELIGIOUS_BAN" (حظر فوري نهائي):
-- يستخدم حصراً إذا كان سياق الجملة يسب الله أو الذات الإلهية، يسب الدين، يسب الأنبياء، أو يستهزئ بالقرآن والمقدسات الدينية.
-
-2. "WARN" (حذف الرسالة + إعطاء تحذير مع ذكر السبب الدقيق):
-- إذا كانت الجملة ككل عبارة عن إعلان ترويجي (دعوة لتعلم التداول، استثمار، دخل يومي، أو دعوة لمراسلة حساب أو متابعة قناة).
-- إذا كانت الجملة توجه شتيمة شخصية قذرة أو قذف أعراض لعضو آخر أو لطائفة كاملة.
-
-3. "ALLOW" (سماح):
-- جميع النقاشات السياسية والعسكرية والاقتصادية والردود التفاعلية بين الأعضاء.
-
-أجب بصيغة JSON فقط:
-{"action": "ALLOW" | "WARN" | "RELIGIOUS_BAN", "reason": "اكتب سبب المخالفة باختصار ووضوح باللغة العربية"}
-"""
-
-def analyze_with_ai(text):
-    if not client:
-        return "ALLOW", ""
-    for model_name in MODELS_TO_TRY:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=text,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    response_mime_type="application/json",
-                    temperature=0.0,
-                )
-            )
-            result = json.loads(response.text)
-            action = result.get("action", "ALLOW")
-            reason = result.get("reason", "مخالفة قوانين النقاش في المجموعة")
-            return action, reason
-        except Exception as e:
-            print(f"Model {model_name} failed: {e}", flush=True)
-            continue
-    return "ALLOW", ""
-
 def delete_later(chat_id, message_id, delay=20):
     def task():
         time.sleep(delay)
@@ -256,6 +216,8 @@ def delete_later(chat_id, message_id, delay=20):
     threading.Thread(target=task, daemon=True).start()
 
 def get_user_mention(user):
+    if not user:
+        return "عضو"
     if user.username:
         return f"@{html.escape(user.username)}"
     name = html.escape(user.first_name or "عضو")
@@ -278,10 +240,9 @@ def format_duration_ar(seconds):
         return f"{hours:.1f} ساعة"
 
 # =====================================================================
-# 5. دوال تنفيذ العقوبات مع إرسال إشعار لغرفة المشرفين
+# 6. دوال تنفيذ العقوبات الفورية
 # =====================================================================
-
-def execute_immediate_ban(message, user_mention, reason, target_user_id=None, delete_msg=True, by_who="النظام الآلي"):
+def execute_immediate_ban(message, user_mention, reason, target_user_id=None, delete_msg=True, by_who="الفلتر الفوري ⚡"):
     uid = target_user_id or message.from_user.id
     offending_text = (message.text or message.caption or "") if message else ""
     if delete_msg and message:
@@ -303,7 +264,7 @@ def execute_immediate_ban(message, user_mention, reason, target_user_id=None, de
     except Exception as e:
         print(f"Immediate Ban error: {e}", flush=True)
 
-def execute_mute(message, target_user_id, user_mention, reason, duration_seconds=3600, delete_msg=True, by_who="النظام الآلي"):
+def execute_mute(message, target_user_id, user_mention, reason, duration_seconds=3600, delete_msg=True, by_who="الفلتر الفوري ⚡"):
     offending_text = (message.text or message.caption or "") if (delete_msg and message) else ""
     if delete_msg and message:
         try:
@@ -356,7 +317,7 @@ def execute_unmute_or_pardon(chat_id, target_user_id, user_mention, unban_too=Fa
     )
     delete_later(chat_id, msg.message_id, delay=12)
 
-def execute_warning(message, user_mention, reason, target_user_id=None, delete_msg=True, by_who="النظام الآلي"):
+def execute_warning(message, user_mention, reason, target_user_id=None, delete_msg=True, by_who="الفلتر الفوري ⚡"):
     uid = target_user_id or message.from_user.id
     offending_text = (message.text or message.caption or "") if (delete_msg and message) else ""
     if delete_msg and message:
@@ -401,7 +362,7 @@ def execute_warning(message, user_mention, reason, target_user_id=None, delete_m
         print(f"Warning execution error: {e}", flush=True)
 
 # =====================================================================
-# 6. استخراج العضو المستهدف ومدة الكتم المخصصة التي يطلبها المشرف
+# 7. معالجة أوامر المشرفين
 # =====================================================================
 def resolve_target_user(message):
     if message.reply_to_message and message.reply_to_message.from_user:
@@ -450,25 +411,22 @@ def extract_mute_duration_seconds(cmd_text):
     else:
         return int(val * 3600)
 
+def is_user_admin(message):
+    if message.sender_chat and message.sender_chat.id == message.chat.id:
+        return True
+    try:
+        member = bot.get_chat_member(message.chat.id, message.from_user.id)
+        if member.status in ['creator', 'administrator']:
+            return True
+    except Exception:
+        pass
+    return False
+
 def handle_admin_commands(message):
-    global active_log_chat_id
     if not message.text:
         return False
 
     raw_cmd_text = message.text.strip().lstrip("/")
-    norm_full = normalize_arabic(raw_cmd_text).lower()
-
-    if norm_full in {"تفعيل السجل", "ربط السجل", "setlog", "سجل المشرفين"}:
-        active_log_chat_id = message.chat.id
-        bot.send_message(
-            message.chat.id,
-            f"✅ <b>تم اعتماد هذه المجموعة كغرفة سجل ومراقبة للمشرفين!</b>\n"
-            f"🆔 معرف المجموعة (لحفظه في Render داخل خانة <code>LOG_CHAT_ID</code> إن أردت ثباته الدائم): <code>{message.chat.id}</code>\n"
-            f"📌 ستصلك هنا جميع تقارير الحظر والكتم والتحذيرات مع نصوص الرسائل المحذوفة دون أن تُمسح.",
-            parse_mode="HTML"
-        )
-        return True
-
     cmd_only = re.sub(r"(@[a-zA-Z0-9_]+|\b\d+(?:\.\d+)?\s*(?:د|دقيقه|دقيقة|دقائق|س|ساعه|ساعة|ساعات|ي|يوم|ايام|أيام|m|h|d)?\b)", "", raw_cmd_text).strip()
     norm_cmd = normalize_arabic(cmd_only).lower()
 
@@ -482,7 +440,7 @@ def handle_admin_commands(message):
         return False
 
     target_uid, target_mention, replied_msg = resolve_target_user(message)
-    admin_name = f"المشرف ({message.from_user.first_name})"
+    admin_name = f"المشرف ({message.from_user.first_name if message.from_user else 'الإدارة'})"
 
     try:
         bot.delete_message(message.chat.id, message.message_id)
@@ -499,4 +457,25 @@ def handle_admin_commands(message):
         return True
 
     if norm_cmd in UNMUTE_CMDS:
-        unban_flag = nor
+        unban_flag = norm_cmd in {"فك الحظر", "الغاء الحظر", "unban", "عفو"}
+        execute_unmute_or_pardon(message.chat.id, target_uid, target_mention, unban_too=unban_flag)
+    elif norm_cmd in MUTE_CMDS:
+        duration_sec = extract_mute_duration_seconds(raw_cmd_text)
+        execute_mute(
+            replied_msg or message,
+            target_uid,
+            target_mention,
+            "قرار إداري من مشرف المجموعة",
+            duration_seconds=duration_sec,
+            delete_msg=bool(replied_msg),
+            by_who=admin_name
+        )
+    elif norm_cmd in BAN_CMDS:
+        execute_immediate_ban(
+            replied_msg or message,
+            target_mention,
+            "قرار إداري مباشر من مشرف المجموعة",
+            target_user_id=target_uid,
+            delete_msg=bool(replied_msg),
+            by_who=admin_name
+     
